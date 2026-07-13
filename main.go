@@ -5,16 +5,24 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/gabriel-ferreira26/test-go/internal/auth"
 	"github.com/gabriel-ferreira26/test-go/internal/notes"
 )
 
 func main() {
-	store := notes.NewStore()
-	handlers := notes.NewHandlers(store)
+	authStore := auth.NewStore()
+	authHandlers := auth.NewHandlers(authStore)
+
+	notesStore := notes.NewStore()
+	notesHandlers := notes.NewHandlers(notesStore)
+
+	mux := http.NewServeMux()
+	authHandlers.Routes(mux)
+	notesHandlers.Routes(mux, authStore.RequireAuth)
 
 	const addr = ":8080"
 	log.Printf("notes API listening on %s", addr)
-	if err := http.ListenAndServe(addr, handlers.Routes()); err != nil {
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
 }

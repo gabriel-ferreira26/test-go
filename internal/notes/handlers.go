@@ -5,6 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+
+	"github.com/gabriel-ferreira26/test-go/internal/auth"
+	"github.com/gabriel-ferreira26/test-go/internal/httpx"
 )
 
 // Handlers wires HTTP requests to the Store.
@@ -17,19 +20,15 @@ func NewHandlers(store *Store) *Handlers {
 	return &Handlers{store: store}
 }
 
-// Routes builds the HTTP router for the notes API.
-//
-// It uses the Go 1.22+ ServeMux, which supports method matching
-// (e.g. "GET /notes") and path wildcards (e.g. "{id}") without
-// needing a third-party router.
-func (h *Handlers) Routes() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /notes", h.list)
-	mux.HandleFunc("POST /notes", h.create)
-	mux.HandleFunc("GET /notes/{id}", h.get)
-	mux.HandleFunc("PUT /notes/{id}", h.update)
-	mux.HandleFunc("DELETE /notes/{id}", h.delete)
-	return mux
+// Routes registers the notes endpoints onto mux. Every route is wrapped
+// with protect (typically an auth.Store's RequireAuth), so a caller must
+// be authenticated before reaching any handler here.
+func (h *Handlers) Routes(mux *http.ServeMux, protect func(http.Handler) http.Handler) {
+	mux.Handle("GET /notes", protect(http.HandlerFunc(h.list)))
+	mux.Handle("POST /notes", protect(http.HandlerFunc(h.create)))
+	mux.Handle("GET /notes/{id}", protect(http.HandlerFunc(h.get)))
+	mux.Handle("PUT /notes/{id}", protect(http.HandlerFunc(h.update)))
+	mux.Handle("DELETE /notes/{id}", protect(http.HandlerFunc(h.delete)))
 }
 
 type noteInput struct {
@@ -38,73 +37,82 @@ type noteInput struct {
 }
 
 func (h *Handlers) list(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.store.All())
+	ownerID, _ := auth.UserIDFromContext(r.Context())
+	httpx.WriteJSON(w, http.StatusOK, h.store.All(ownerID))
 }
 
 func (h *Handlers) create(w http.ResponseWriter, r *http.Request) {
+	ownerID, _ := auth.UserIDFromContext(r.Context())
+
 	var in noteInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		httpx.WriteError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if in.Title == "" {
-		writeError(w, http.StatusBadRequest, "title is required")
+		httpx.WriteError(w, http.StatusBadRequest, "title is required")
 		return
 	}
 
-	note := h.store.Create(in.Title, in.Content)
-	writeJSON(w, http.StatusCreated, note)
+	note := h.store.Create(ownerID, in.Title, in.Content)
+	httpx.WriteJSON(w, http.StatusCreated, note)
 }
 
 func (h *Handlers) get(w http.ResponseWriter, r *http.Request) {
+	ownerID, _ := auth.UserIDFromContext(r.Context())
+
 	id, err := idFromPath(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid note id")
+		httpx.WriteError(w, http.StatusBadRequest, "invalid note id")
 		return
 	}
 
-	note, err := h.store.Get(id)
+	note, err := h.store.Get(id, ownerID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "note not found")
+		httpx.WriteError(w, http.StatusNotFound, "note not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, note)
+	httpx.WriteJSON(w, http.StatusOK, note)
 }
 
 func (h *Handlers) update(w http.ResponseWriter, r *http.Request) {
+	ownerID, _ := auth.UserIDFromContext(r.Context())
+
 	id, err := idFromPath(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid note id")
+		httpx.WriteError(w, http.StatusBadRequest, "invalid note id")
 		return
 	}
 
 	var in noteInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		httpx.WriteError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if in.Title == "" {
-		writeError(w, http.StatusBadRequest, "title is required")
+		httpx.WriteError(w, http.StatusBadRequest, "title is required")
 		return
 	}
 
-	note, err := h.store.Update(id, in.Title, in.Content)
+	note, err := h.store.Update(id, ownerID, in.Title, in.Content)
 	if errors.Is(err, ErrNotFound) {
-		writeError(w, http.StatusNotFound, "note not found")
+		httpx.WriteError(w, http.StatusNotFound, "note not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, note)
+	httpx.WriteJSON(w, http.StatusOK, note)
 }
 
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
+	ownerID, _ := auth.UserIDFromContext(r.Context())
+
 	id, err := idFromPath(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid note id")
+		httpx.WriteError(w, http.StatusBadRequest, "invalid note id")
 		return
 	}
 
-	if err := h.store.Delete(id); errors.Is(err, ErrNotFound) {
-		writeError(w, http.StatusNotFound, "note not found")
+	if err := h.store.Delete(id, ownerID); errors.Is(err, ErrNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "note not found")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -112,14 +120,4 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 
 func idFromPath(r *http.Request) (int, error) {
 	return strconv.Atoi(r.PathValue("id"))
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
 }
